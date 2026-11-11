@@ -8,13 +8,15 @@ import { calculateRecipeNutrition, createMyBlog, createMyVideo, getBlogCategorie
 import { getAllergyIngredients } from '../services/profileApi';
 import { stripHtmlToCleanText } from '../services/communityApi';
 import { apiRequest } from '../services/apiClient';
+import { htmlToPlainText } from '../utils/content';
 import '../styles/my-blogs.css';
 import '../styles/create-blog.css';
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const CONTENT_TYPES = { BLOG: 'blog', VIDEO: 'video' };
-const MAX_VIDEO_SIZE = 200 * 1024 * 1024;
+const MAX_VIDEO_SIZE = 25 * 1024 * 1024;
+const VIDEO_SIZE_ERROR = 'Video size must not exceed 25 MB. Please choose a smaller file.';
 const VIDEO_TYPES = ['video/mp4', 'video/webm', 'video/quicktime'];
 
 function handleEditorPaste(event) {
@@ -258,6 +260,7 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [videoFile, setVideoFile] = useState(null);
+  const [videoError, setVideoError] = useState('');
   const [videoPreviewUrl, setVideoPreviewUrl] = useState('');
   const [videoDuration, setVideoDuration] = useState(null);
   const [categoryId, setCategoryId] = useState('');
@@ -277,6 +280,7 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
   const [existingMediaUrl, setExistingMediaUrl] = useState('');
   const [loadingContent, setLoadingContent] = useState(isEditing);
   const [error, setError] = useState('');
+  const [titleError, setTitleError] = useState('');
   const [busy, setBusy] = useState(false);
   const bodyRef = useRef(null);
   const dialogRef = useRef(null);
@@ -286,10 +290,16 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
 
   const isVideo = isEditing ? editType === CONTENT_TYPES.VIDEO : contentType === CONTENT_TYPES.VIDEO;
   const trimmedTitle = title.trim();
-  const bodyHtml = body.trim();
-  const trimmedBody = body.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').trim();
+  const plainBody = htmlToPlainText(body);
+  const trimmedBody = plainBody.trim();
   const hasVideo = Boolean(videoFile || (isEditing && existingMediaUrl));
   const hasThumbnail = Boolean(file || existingThumbnailUrl);
+
+  function validateTitle(value = title) {
+    if (!value.trim()) return 'Title is required.';
+    if (value.length > 255) return 'Title must not exceed 255 characters.';
+    return '';
+  }
 
   const ingredientOptions = useMemo(() => {
     const names = new Set();
@@ -306,7 +316,7 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
 
   function missingRequiredFields() {
     const missing = [];
-    if (!trimmedTitle) missing.push('title');
+    if (validateTitle()) missing.push('title');
     if (!trimmedBody) missing.push(isVideo ? 'video description' : 'post content');
     if (isVideo && !hasVideo) missing.push('video file');
     if (!hasThumbnail) missing.push(isVideo ? 'video thumbnail' : 'cover image');
@@ -531,11 +541,21 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
   function chooseVideo(event) {
     const selected = event.target.files?.[0];
     if (!selected) return;
-    if (!VIDEO_TYPES.includes(selected.type) || selected.size > MAX_VIDEO_SIZE) {
-      setError('Choose an MP4, WebM, or MOV video no larger than 200 MB.');
+    if (selected.size > MAX_VIDEO_SIZE) {
+      setVideoFile(null);
+      setVideoError(VIDEO_SIZE_ERROR);
+      setError('');
       event.target.value = '';
       return;
     }
+    if (!VIDEO_TYPES.includes(selected.type)) {
+      setVideoFile(null);
+      setVideoError('Choose an MP4, WebM, or MOV video.');
+      setError('');
+      event.target.value = '';
+      return;
+    }
+    setVideoError('');
     setError('');
     setVideoFile(selected);
   }
@@ -543,6 +563,9 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
   async function submit(event, intent) {
     event.preventDefault();
     if (preview || submitting.current) return;
+    const currentTitleError = validateTitle();
+    setTitleError(currentTitleError);
+    if (currentTitleError) return;
     const missing = missingRequiredFields();
     if (missing.length) {
       setError(`Vui lòng điền đủ các trường bắt buộc: ${missing.join(', ')}.`);
@@ -555,7 +578,7 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
       const thumbnailUrl = file ? await uploadBlogThumbnail(file) : existingThumbnailUrl || null;
       const payload = {
         title: trimmedTitle,
-        body: bodyHtml.replace(/<!--\s*StartFragment\s*-->/gi, '').replace(/<!--\s*EndFragment\s*-->/gi, ''),
+        body: plainBody,
         recipe: makeRecipePayload(recipeDetails, ingredientRows, stepRows),
         thumbnailUrl,
         categoryId: Number(categoryId),
@@ -638,10 +661,25 @@ export default function CreateBlogPage({ modal = false, onClose, defaultType = '
         </div></div>}
         <div className="create-blog-section-heading"><span>01</span><div><h2>{isVideo ? 'Your video' : 'Your blog'}</h2><p>{isVideo ? 'Upload the clip and explain what viewers will learn.' : 'Give it a clear title and share the details your readers need.'}</p></div></div>
         <label htmlFor="create-blog-title">Title <small>{title.length}/255</small></label>
-        <input id="create-blog-title" value={title} onChange={(event) => setTitle(event.target.value)} maxLength={255} placeholder="What would you like to share?" disabled={busy}/>
+        <input
+          id="create-blog-title"
+          value={title}
+          onChange={(event) => {
+            const nextTitle = event.target.value;
+            setTitle(nextTitle);
+            setTitleError(validateTitle(nextTitle));
+          }}
+          className={titleError ? 'create-blog-input-error' : ''}
+          aria-invalid={Boolean(titleError)}
+          aria-describedby={titleError ? 'create-blog-title-error' : undefined}
+          placeholder="What would you like to share?"
+          disabled={busy}
+        />
+        {titleError && <p id="create-blog-title-error" className="create-blog-field-error" role="alert">{titleError}</p>}
         {isVideo && <div className="create-video-upload">
-          <label htmlFor="create-video-file"><FileVideo size={20}/><span><b>{videoFile ? videoFile.name : 'Upload a video file'}</b><small>MP4, WebM, or MOV · max 200 MB</small></span></label>
+          <label htmlFor="create-video-file"><FileVideo size={20}/><span><b>{videoFile ? videoFile.name : 'Upload a video file'}</b><small>MP4, WebM, or MOV · max 25 MB</small></span></label>
           <input id="create-video-file" type="file" accept="video/mp4,video/webm,video/quicktime" onChange={chooseVideo} disabled={busy}/>
+          {videoError && <p className="create-blog-field-error create-video-error" role="alert">{videoError}</p>}
           {videoFile && <button type="button" className="create-blog-remove" onClick={() => setVideoFile(null)} disabled={busy}><X size={14}/> Remove replacement</button>}
           {videoPreviewUrl && <video className="create-video-preview" src={videoPreviewUrl} controls preload="metadata" onLoadedMetadata={(event) => setVideoDuration(event.currentTarget.duration)} aria-label="Video file preview"/>}
         </div>}

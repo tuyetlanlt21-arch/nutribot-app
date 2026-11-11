@@ -79,22 +79,46 @@ describe('admin recipe suggestion review (NB-87)', () => {
     vi.clearAllMocks();
   });
 
-  it('opens on Pending and lets Admin toggle chronological order', async () => {
+  it('opens on the Pending queue with moderation-style search and content filters', async () => {
     render(<AdminContentRecipeSuggestionsPage />);
 
     await waitFor(() => expect(contentRecipeSuggestionsApi.list).toHaveBeenCalledWith(
       expect.objectContaining({ status: 'PENDING' }), expect.any(AbortSignal),
     ));
-    fireEvent.click(await screen.findByRole('button', { name: 'Sort by oldest first' }));
-    expect(screen.getByRole('button', { name: 'Sort by newest first' })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'Search pending recipe suggestions' })).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Recipe source type' })).toBeTruthy();
+  });
+
+  it('keeps pending work separate from completed review history', async () => {
+    const approved = suggestion({ suggestionId: 6, status: 'APPROVED', source: { ...suggestion().source, title: 'Approved soup' } });
+    contentRecipeSuggestionsApi.list.mockResolvedValue({ content: [suggestion(), approved], totalElements: 2, totalPages: 1 });
+    render(<AdminContentRecipeSuggestionsPage />);
+
+    await screen.findByRole('button', { name: 'Review Queue' });
+    fireEvent.click(screen.getByRole('button', { name: 'History' }));
+
+    await waitFor(() => expect(contentRecipeSuggestionsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: '' }), expect.any(AbortSignal),
+    ));
+    expect(screen.getByRole('heading', { name: 'Recipe suggestion history' })).toBeTruthy();
+    expect(screen.getByText('Approved soup')).toBeTruthy();
+    expect(screen.queryByText('BÃºn gáº¡o lá»©t rau cá»§')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Recipe suggestion review detail' })).toBeNull();
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter review history by decision' }), {
+      target: { value: 'APPROVED' },
+    });
+    await waitFor(() => expect(contentRecipeSuggestionsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: 'APPROVED' }), expect.any(AbortSignal),
+    ));
   });
 
   it('blocks approval and lists validation issues for an invalid suggestion', async () => {
     render(<AdminContentRecipeSuggestionsPage />);
 
-    expect(await screen.findByRole('heading', { name: 'Cannot approve yet' })).toBeTruthy();
+    expect(await screen.findByText('Validation needs attention')).toBeTruthy();
     expect(screen.getByText('Nguyên liệu "Bún gạo lứt" thiếu số lượng')).toBeTruthy();
-    expect(screen.getByText('ingredients[0].quantity')).toBeTruthy();
+    expect(document.querySelector('.recipe-suggestion-compact-issues')?.textContent).toContain('ingredients[0].quantity');
     expect(screen.getByRole('button', { name: 'Approve suggestion' }).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'Reject' }).disabled).toBe(false);
   });
@@ -109,7 +133,7 @@ describe('admin recipe suggestion review (NB-87)', () => {
 
     render(<AdminContentRecipeSuggestionsPage />);
 
-    expect((await screen.findByLabelText('Serving information')).textContent).not.toContain('Missing');
+    expect((await screen.findByText('Nutrition')).closest('.recipe-suggestion-detail-body')?.textContent).not.toContain('Missing serving');
   });
 
   it('does not show the legacy serving warning in pre-approval checks', async () => {
@@ -123,7 +147,7 @@ describe('admin recipe suggestion review (NB-87)', () => {
 
     render(<AdminContentRecipeSuggestionsPage />);
 
-    expect(await screen.findByText('Data validation passed.')).toBeTruthy();
+    expect(await screen.findByText('Validation warnings')).toBeTruthy();
     expect(screen.queryByText('Serving information is missing.')).toBeNull();
   });
 
@@ -189,7 +213,7 @@ describe('admin recipe suggestion review (NB-87)', () => {
 
     render(<AdminContentRecipeSuggestionsPage />);
 
-    expect(await screen.findByText('! Consent outdated')).toBeTruthy();
+    expect(await screen.findByText(/Consent outdated/)).toBeTruthy();
     expect(screen.getByText(/Author consented to terms v0; current terms are v1/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Approve suggestion' }).disabled).toBe(true);
   });
@@ -202,7 +226,7 @@ describe('admin recipe suggestion review (NB-87)', () => {
 
     render(<AdminContentRecipeSuggestionsPage />);
 
-    expect(await screen.findByRole('heading', { name: 'Ready to approve' })).toBeTruthy();
+    expect(await screen.findByText('Validation confirmed')).toBeTruthy();
     const approve = screen.getByRole('button', { name: 'Approve suggestion' });
     expect(approve.disabled).toBe(false);
     fireEvent.click(approve);
@@ -238,7 +262,7 @@ describe('admin recipe suggestion review (NB-87)', () => {
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('Approval was blocked');
     expect(alert.textContent).toContain('Dữ liệu công thức chưa hợp lệ, không thể duyệt');
-    expect(alert.textContent).toContain('dish.name');
+    expect(alert.textContent).toContain('Dish name');
     expect(alert.textContent).toContain('Đề xuất thiếu tên món ăn');
     expect(screen.getByRole('heading', { name: 'Approve this suggestion?' })).toBeTruthy();
   });
@@ -252,10 +276,11 @@ describe('admin recipe suggestion review (NB-87)', () => {
     render(<AdminContentRecipeSuggestionsPage />);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Reject' }));
-    fireEvent.change(screen.getByPlaceholderText(/nutrition information needs a verifiable source/), {
+    fireEvent.change(screen.getByRole('combobox', { name: 'Rejection reason' }), { target: { value: 'OTHER' } });
+    fireEvent.change(screen.getByPlaceholderText(/Explain why this recipe should be rejected/), {
       target: { value: 'Thiếu nguồn dinh dưỡng' },
     });
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Reject' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm rejection' }));
 
     await waitFor(() => expect(contentRecipeSuggestionsApi.review)
       .toHaveBeenCalledWith(5, 'REJECT', 'Thiếu nguồn dinh dưỡng', []));

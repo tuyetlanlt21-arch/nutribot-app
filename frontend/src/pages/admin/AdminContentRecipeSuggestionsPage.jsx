@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowUpDown, Check, ChevronLeft, ChevronRight, ExternalLink, Eye, FileText, ListOrdered, MapPin, PlaySquare, Plus, Search, Soup, UserRound, UtensilsCrossed, X } from 'lucide-react';
+import { AlertTriangle, ArrowUpDown, Check, ChefHat, ChevronLeft, ChevronRight, Clock3, ExternalLink, Eye, FileText, Info, ListOrdered, MapPin, PlaySquare, Plus, Search, Soup, UserRound, UsersRound, UtensilsCrossed, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AdminToolbar, EmptyState, ErrorState, LoadingState, PageHeader, Toast } from '../../components/admin/AdminUi';
 import { contentRecipeSuggestionsApi, isRecipeConsentValid, RECIPE_CONSENT_TERMS_VERSION } from '../../services/contentRecipeSuggestionsApi';
@@ -22,6 +22,18 @@ const formatDate = (value) => {
 
 const statusLabels = { PENDING: 'Pending', APPROVED: 'Approved', REJECTED: 'Rejected' };
 const statusLabel = (status) => statusLabels[status] ?? status ?? 'Pending';
+const recipeRejectionReasons = [
+  ['INCOMPLETE_RECIPE', 'Incomplete recipe information'],
+  ['INCORRECT_INGREDIENTS', 'Incorrect ingredient information'],
+  ['INVALID_INSTRUCTIONS', 'Invalid preparation instructions'],
+  ['INACCURATE_NUTRITION', 'Inaccurate nutritional information'],
+  ['SOURCE_MISMATCH', 'Recipe does not match the source blog'],
+  ['DUPLICATE_RECIPE', 'Duplicate or substantially similar recipe'],
+  ['DIETARY_REQUIREMENTS', 'Does not meet dietary requirements'],
+  ['CONTENT_QUALITY', 'Content quality does not meet standards'],
+  ['OTHER', 'Other — specify a reason'],
+];
+const recipeRejectionReasonMaxLength = 2000;
 
 const groupIngredientValidationIssues = (issues = []) => {
   const groups = new Map();
@@ -39,6 +51,22 @@ const groupIngredientValidationIssues = (issues = []) => {
     ? { ...issue, field: `ingredients (${count})` }
     : issue);
 };
+
+const validationFieldLabels = {
+  'dish.name': 'Dish name',
+  'dish.description': 'Dish description',
+  'dish.serving': 'Serving information',
+  'recipe.title': 'Recipe title',
+  'recipe.description': 'Recipe description',
+  'recipe.servings': 'Servings',
+  'nutrition.calories': 'Calories',
+  'nutrition.proteinG': 'Protein',
+  'nutrition.carbsG': 'Carbohydrates',
+  'nutrition.fatG': 'Total fat',
+  'nutrition.fiberG': 'Fiber',
+};
+
+const readableValidationField = (field) => validationFieldLabels[field] ?? field ?? 'Suggestion';
 
 function SuggestionStatus({ status }) {
   const safeStatus = String(status || 'PENDING').toLowerCase();
@@ -72,7 +100,7 @@ function ValidationPanel({ validation }) {
       ? <p className="recipe-suggestion-validation-ok"><Check size={15} /> Data validation passed.</p>
       : <ul className="recipe-suggestion-issues">{displayedIssues.map((issue, index) => <li key={`${issue.field}-${issue.code}-${index}`} className={`is-${issue.severity.toLowerCase()}`}>
         <span>{issue.severity === 'ERROR' ? <X size={14} /> : <AlertTriangle size={14} />}</span>
-        <div><strong>{issue.field || 'Suggestion'}</strong><p>{issue.message}</p></div>
+        <div><strong>{readableValidationField(issue.field)}</strong><p>{issue.message}</p></div>
       </li>)}</ul>}
   </section>;
 }
@@ -89,14 +117,14 @@ function NutritionGrid({ nutrition }) {
   return <div className="recipe-suggestion-nutrition-grid">{values.map(([label, value, unit]) => <div key={label}><span>{label}</span><strong>{value}<small> {unit}</small></strong></div>)}</div>;
 }
 
-function IngredientMatcher({ proposalName, ingredients, value, onChange }) {
+function IngredientMatcher({ proposalName, ingredients, value, onChange, loading = false }) {
   const selected = ingredients.find((item) => String(item.ingredientId) === String(value));
   const [query, setQuery] = useState(selected?.name ?? '');
   const [open, setOpen] = useState(false);
   useEffect(() => { setQuery(selected?.name ?? ''); }, [selected?.name]);
   const matches = ingredients.filter((item) => item.name.toLocaleLowerCase('vi').includes(query.trim().toLocaleLowerCase('vi')));
   const choose = (item) => { onChange(item.ingredientId); setQuery(item.name); setOpen(false); };
-  return <div className="recipe-suggestion-ingredient-search"><Search size={16} aria-hidden="true" /><input role="combobox" aria-label={`Catalog match for ${proposalName}`} aria-expanded={open} aria-controls={`ingredient-results-${proposalName}`} autoComplete="off" value={query} placeholder="Search active ingredients..." onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); onChange(''); }} />{value && <button type="button" aria-label={`Clear catalog match for ${proposalName}`} onClick={() => { onChange(''); setQuery(''); setOpen(true); }}><X size={14} /></button>}{open && <div id={`ingredient-results-${proposalName}`} role="listbox" className="recipe-suggestion-ingredient-results">{matches.length ? matches.map((item) => <button type="button" role="option" aria-selected={String(item.ingredientId) === String(value)} key={item.ingredientId} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>{item.name}</button>) : <p>No active ingredients match this search.</p>}</div>}</div>;
+  return <div className="recipe-suggestion-ingredient-search"><Search size={16} aria-hidden="true" /><input role="combobox" aria-label={`Catalog match for ${proposalName}`} aria-expanded={open} aria-controls={`ingredient-results-${proposalName}`} autoComplete="off" value={query} placeholder="Search active ingredients..." onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); onChange(''); }} />{value && <button type="button" aria-label={`Clear catalog match for ${proposalName}`} onClick={() => { onChange(''); setQuery(''); setOpen(true); }}><X size={14} /></button>}{open && <div id={`ingredient-results-${proposalName}`} role="listbox" className="recipe-suggestion-ingredient-results">{loading ? <p>Loading active ingredients...</p> : matches.length ? matches.map((item) => <button type="button" role="option" aria-selected={String(item.ingredientId) === String(value)} key={item.ingredientId} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>{item.name}</button>) : <p>No active ingredients match this search.</p>}</div>}</div>;
 }
 
 function RecipeDetail({ suggestion, showReviewControls, onReview, onOpenSource, submitting, catalogIngredients = [], ingredientMappings = {}, onIngredientMapping, onCreateIngredient, mappingSectionRef }) {
@@ -115,9 +143,9 @@ function RecipeDetail({ suggestion, showReviewControls, onReview, onOpenSource, 
       ? `Author consented to terms ${source.recipeConsentTermsVersion}; current terms are ${RECIPE_CONSENT_TERMS_VERSION}. The author must consent again.`
       : 'Author consent is required before this suggestion can be approved.')
     : 'Resolve the validation errors before approving this suggestion.';
-  return <article className="recipe-suggestion-detail" aria-label="Suggestion detail">
-    <header className="recipe-suggestion-detail-head">
-      <div><span>REVIEW DETAIL</span><SuggestionStatus status={suggestion.status} /></div>
+  return <article className="admin-panel moderation-detail recipe-suggestion-detail" aria-label="Suggestion detail">
+    <header className="moderation-detail-header recipe-suggestion-detail-head">
+      <div><span>{source.contentType === 'VIDEO' ? 'VIDEO SUBMISSION' : 'BLOG SUBMISSION'}</span><SuggestionStatus status={suggestion.status} /></div>
       <time dateTime={suggestion.createdAt}>Received {formatDate(suggestion.createdAt)}</time>
     </header>
 
@@ -139,7 +167,7 @@ function RecipeDetail({ suggestion, showReviewControls, onReview, onOpenSource, 
       <ValidationPanel validation={validation} />
 
       {validation?.ingredientResolutions?.some((item) => ['UNRESOLVED', 'AMBIGUOUS', 'INVALID_CATEGORY', 'DUPLICATED'].includes(item.status)) && <section ref={mappingSectionRef} className="recipe-suggestion-section recipe-suggestion-mapping-section" aria-label="Ingredient catalog matching">
-        {(() => { const unresolved = validation.ingredientResolutions.filter((item) => ['UNRESOLVED', 'AMBIGUOUS', 'INVALID_CATEGORY', 'DUPLICATED'].includes(item.status)); return <><div className="recipe-suggestion-section-title"><UtensilsCrossed size={17} /><h3>Match ingredients to catalog</h3><span>{unresolved.length} ingredient{unresolved.length === 1 ? '' : 's'} need attention</span></div><p className="recipe-suggestion-mapping-help">Choose an existing catalog ingredient, or create one without leaving this review.</p><div className="recipe-suggestion-mapping-list">{unresolved.map((item) => <div key={item.proposalIndex} className="recipe-suggestion-ingredient-match"><div className="recipe-suggestion-original-ingredient"><small>Original ingredient</small><strong>{item.proposedName}</strong></div><span className="recipe-suggestion-mapping-arrow">Convert to</span><IngredientMatcher proposalName={item.proposedName} ingredients={catalogIngredients} value={ingredientMappings[item.proposalIndex] ?? ''} onChange={(id) => onIngredientMapping?.(item.proposalIndex, id)} /><button type="button" className="recipe-suggestion-create-ingredient" onClick={() => onCreateIngredient?.(item.proposalIndex, item.proposedName)}><Plus size={15} /> Add ingredient</button></div>)}</div></>; })()}
+        {(() => { const unresolved = validation.ingredientResolutions.filter((item) => ['UNRESOLVED', 'AMBIGUOUS', 'INVALID_CATEGORY', 'DUPLICATED'].includes(item.status)); return <><div className="recipe-suggestion-section-title"><UtensilsCrossed size={17} /><h3>Match ingredients to catalog</h3><span>{unresolved.length} ingredient{unresolved.length === 1 ? '' : 's'} need attention</span></div><p className="recipe-suggestion-mapping-help">Choose an existing catalog ingredient, or create one without leaving this review.</p><div className="recipe-suggestion-mapping-list">{unresolved.map((item) => <div key={item.proposalIndex} className="recipe-suggestion-ingredient-match"><div className="recipe-suggestion-original-ingredient"><small>Original ingredient</small><strong>{item.proposedName}</strong></div><span className="recipe-suggestion-mapping-arrow">Convert to</span><IngredientMatcher proposalName={item.proposedName} ingredients={catalogIngredients} loading={catalogIngredientsLoading} value={ingredientMappings[item.proposalIndex] ?? ''} onChange={(id) => onIngredientMapping?.(item.proposalIndex, id)} /><button type="button" className="recipe-suggestion-create-ingredient" onClick={() => onCreateIngredient?.(item.proposalIndex, item.proposedName)}><Plus size={15} /> Add ingredient</button></div>)}</div></>; })()}
       </section>}
 
       <section className="recipe-suggestion-section">
@@ -173,12 +201,44 @@ function RecipeDetail({ suggestion, showReviewControls, onReview, onOpenSource, 
 
       {(restaurant.name || restaurant.address || restaurant.reference) && <section className="recipe-suggestion-restaurant"><MapPin size={17} /><div><h3>Restaurant reference</h3>{restaurant.name && <strong>{restaurant.name}</strong>}{restaurant.address && <p>{restaurant.address}</p>}{restaurant.reference && <a href={restaurant.reference} target="_blank" rel="noreferrer">Open restaurant reference <ExternalLink size={13} /></a>}</div></section>}
 
-      {(suggestion.rejectionReason || suggestion.reviewedAt) && <section className={`recipe-suggestion-review-record is-${String(suggestion.status || '').toLowerCase()}`}>
-        <span className="recipe-suggestion-review-record-icon">{suggestion.status === 'REJECTED' ? <X size={16} /> : <Check size={16} />}</span>
-        <div><strong>{suggestion.status === 'REJECTED' ? 'Suggestion rejected' : 'Suggestion reviewed'}</strong>{suggestion.rejectionReason && <p>{suggestion.rejectionReason}</p>}</div>
-        {suggestion.reviewedAt && <time dateTime={suggestion.reviewedAt}>{formatDate(suggestion.reviewedAt)}{suggestion.reviewerName ? ` by ${suggestion.reviewerName}` : ''}</time>}
-      </section>}
-      {showReviewControls && suggestion.status === 'PENDING' && <footer className="recipe-suggestion-review-actions"><div><strong>Decision required</strong><span>{approvalBlocked ? blockedMessage : 'Approve to import this dish and recipe, or reject with a reason.'}</span></div><div><button type="button" className="admin-btn secondary recipe-suggestion-reject" disabled={submitting} onClick={() => onReview('REJECT')}><X size={16} /> Reject</button><button type="button" className="admin-btn primary" disabled={submitting || approvalBlocked} title={approvalBlocked ? blockedMessage : undefined} onClick={() => onReview('APPROVE')}><Check size={16} /> Approve suggestion</button></div></footer>}
+      {showReviewControls && suggestion.status === 'PENDING' && <footer className="moderation-actions recipe-suggestion-review-actions"><div><strong>Decision required</strong><span>{approvalBlocked ? blockedMessage : 'Approve to import this dish and recipe, or reject with a reason.'}</span></div><div><button type="button" className="admin-btn secondary recipe-suggestion-reject" disabled={submitting} onClick={() => onReview('REJECT')}><X size={16} /> Reject</button><button type="button" className="admin-btn primary" disabled={submitting || approvalBlocked} title={approvalBlocked ? blockedMessage : undefined} onClick={() => onReview('APPROVE')}><Check size={16} /> Approve suggestion</button></div></footer>}
+    </div>
+  </article>;
+}
+
+function RecipeSuggestionMetadata({ totalMinutes, servings, ingredientCount, stepCount }) {
+  return <div className="recipe-suggestion-metadata" aria-label="Recipe summary">
+    <span className="recipe-suggestion-metadata__item"><Clock3 size={15} /><b>{totalMinutes > 0 ? `${totalMinutes} min` : '—'}</b><small>Total time</small></span>
+    <span className="recipe-suggestion-metadata__item"><UsersRound size={15} /><b>{servings ?? '—'}</b><small>Servings</small></span>
+    <span className="recipe-suggestion-metadata__item"><UtensilsCrossed size={15} /><b>{ingredientCount}</b><small>Ingredients</small></span>
+    <span className="recipe-suggestion-metadata__item"><ListOrdered size={15} /><b>{stepCount}</b><small>Steps</small></span>
+  </div>;
+}
+
+function EditorialRecipeDetail({ suggestion, showReviewControls, onReview, onOpenSource, sourceImage, submitting, catalogIngredients = [], catalogIngredientsLoading = false, ingredientMappings = {}, onIngredientMapping, onCreateIngredient, mappingSectionRef }) {
+  const { source, dish, recipe, nutrition, ingredients, restaurant, validation } = suggestion;
+  const consentValid = isRecipeConsentValid(source);
+  const consentOutdated = source.recipeConsent === true && Boolean(source.recipeConsentTermsVersion) && source.recipeConsentTermsVersion !== RECIPE_CONSENT_TERMS_VERSION;
+  const errors = (validation?.issues ?? []).filter((issue) => issue.severity === 'ERROR');
+  const warnings = (validation?.issues ?? []).filter((issue) => issue.severity === 'WARNING');
+  const mappingCodes = ['INGREDIENT_MAPPING_REQUIRED', 'INGREDIENT_MAPPING_AMBIGUOUS', 'INGREDIENT_CATEGORY_INVALID', 'INGREDIENT_MAPPING_DUPLICATED', 'VEGETARIAN_TYPE_UNKNOWN'];
+  const mappingOnlyBlocked = errors.length > 0 && errors.every((issue) => mappingCodes.includes(issue.code));
+  const approvalBlocked = !consentValid || (validation?.canApprove === false && !mappingOnlyBlocked);
+  const blockedMessage = !consentValid ? (consentOutdated ? `Author consented to terms ${source.recipeConsentTermsVersion}; current terms are ${RECIPE_CONSENT_TERMS_VERSION}. The author must consent again.` : 'Author consent is required before this suggestion can be approved.') : 'Resolve the validation errors before approving this suggestion.';
+  const unresolved = validation?.ingredientResolutions?.filter((item) => ['UNRESOLVED', 'AMBIGUOUS', 'INVALID_CATEGORY', 'DUPLICATED'].includes(item.status)) ?? [];
+  const totalMinutes = (recipe.prepTimeMin ?? 0) + (recipe.cookTimeMin ?? 0);
+  const validationTone = errors.length ? 'is-blocked' : warnings.length ? 'is-warning' : 'is-ready';
+  const validationIssues = (validation?.issues ?? []).filter((issue) => issue.field !== 'dish.serving');
+  const displayedValidationIssues = groupIngredientValidationIssues(validationIssues);
+  return <article className="admin-panel moderation-detail recipe-suggestion-detail" aria-label="Suggestion detail">
+    <header className="moderation-detail-header recipe-suggestion-detail-head"><div><span>RECIPE SUGGESTION</span><SuggestionStatus status={suggestion.status} /></div><time dateTime={suggestion.createdAt}>Received {formatDate(suggestion.createdAt)}</time></header>
+    <div className="recipe-suggestion-detail-body">
+      <section className="recipe-suggestion-hero" aria-labelledby="proposed-dish-title"><div className="recipe-suggestion-hero-top"><div className="recipe-suggestion-hero-copy"><div className="recipe-suggestion-kicker"><ChefHat size={16} /><span>PROPOSED DISH</span></div><h2 id="proposed-dish-title">{dish.name}</h2>{dish.description && <p className="recipe-suggestion-hero-description">{dish.description}</p>}<div className={`recipe-suggestion-validation-compact ${validationTone}`}><span className="recipe-suggestion-validation-dot" /><strong>{errors.length ? 'Validation needs attention' : warnings.length ? 'Validation warnings' : validation?.valid === true ? 'Validation confirmed' : 'Validation not confirmed'}</strong><span className={consentValid ? 'recipe-suggestion-consent recipe-suggestion-consent--yes' : 'recipe-suggestion-consent recipe-suggestion-consent--no'}>{consentValid ? '✓ Consent granted' : consentOutdated ? '! Consent outdated' : '✗ No consent'}</span>{validation?.vegetarianType && <span className="recipe-suggestion-diet">{validation.vegetarianType.replaceAll('_', ' ')}</span>}<button type="button" className="recipe-suggestion-source-toggle" aria-haspopup="dialog" onClick={() => onOpenSource(source)}><FileText size={14} /> View source blog</button></div>{displayedValidationIssues.length > 0 && <ul className="recipe-suggestion-compact-issues">{displayedValidationIssues.map((issue, index) => <li key={`${issue.field}-${issue.code}-${index}`} className={`is-${issue.severity.toLowerCase()}`}><span>{issue.severity === 'ERROR' ? <X size={13} /> : <AlertTriangle size={13} />}</span><div><b>{readableValidationField(issue.field)}</b><span>{issue.message}</span></div></li>)}</ul>}</div>{sourceImage && <img className="recipe-suggestion-hero-image" src={sourceImage} alt={`${dish.name} proposed dish`} />}</div><RecipeSuggestionMetadata totalMinutes={totalMinutes} servings={recipe.servings} ingredientCount={ingredients.length} stepCount={recipe.steps.length} /></section>
+      <section className="recipe-suggestion-section recipe-suggestion-nutrition-section" aria-labelledby="nutrition-title"><div className="recipe-suggestion-section-title"><Soup size={17} /><h3 id="nutrition-title">Nutrition</h3><span>{recipe.servings ? `Per ${recipe.servings === 1 ? 'serving' : 'recipe'}` : 'Available values'}</span></div><NutritionGrid nutrition={nutrition} /></section>
+      <section className="recipe-suggestion-section" aria-labelledby="ingredients-title"><div className="recipe-suggestion-section-title"><UtensilsCrossed size={17} /><h3 id="ingredients-title">Ingredients</h3></div>{ingredients.length ? <ul className="recipe-suggestion-ingredients">{ingredients.map((ingredient, index) => <li key={`${ingredient.name}-${index}`}><span>{ingredient.name}</span><small>{[ingredient.quantity, ingredient.unit].filter(Boolean).join(' ') || ingredient.notes || 'Quantity unavailable'}</small></li>)}</ul> : <p className="recipe-suggestion-missing">No ingredients were supplied by the server.</p>}{unresolved.length > 0 && <section ref={mappingSectionRef} className="recipe-suggestion-mapping-section" aria-label="Ingredient catalog matching"><div className="recipe-suggestion-section-title"><UtensilsCrossed size={16} /><h3>Match ingredients to catalog</h3><span>{unresolved.length} need attention</span></div><p className="recipe-suggestion-mapping-help">Choose an existing catalog ingredient, or create one without leaving this review.</p><div className="recipe-suggestion-mapping-list">{unresolved.map((item) => <div key={item.proposalIndex} className="recipe-suggestion-ingredient-match"><div className="recipe-suggestion-original-ingredient"><small>Original ingredient</small><strong>{item.proposedName}</strong></div><span className="recipe-suggestion-mapping-arrow">Convert to</span><IngredientMatcher proposalName={item.proposedName} ingredients={catalogIngredients} loading={catalogIngredientsLoading} value={ingredientMappings[item.proposalIndex] ?? ''} onChange={(id) => onIngredientMapping?.(item.proposalIndex, id)} /><button type="button" className="recipe-suggestion-create-ingredient" onClick={() => onCreateIngredient?.(item.proposalIndex, item.proposedName)}><Plus size={15} /> Add ingredient</button></div>)}</div></section>}</section>
+      <section className="recipe-suggestion-section" aria-labelledby="steps-title"><div className="recipe-suggestion-section-title"><ListOrdered size={17} /><h3 id="steps-title">Preparation Steps</h3></div>{recipe.description && <p className="recipe-suggestion-recipe-description">{recipe.description}</p>}{recipe.steps.length ? <ol className="recipe-suggestion-steps">{recipe.steps.map((step, index) => <li key={`${step}-${index}`}><span className="recipe-suggestion-step-number">{index + 1}</span><p>{step}</p></li>)}</ol> : <p className="recipe-suggestion-missing">No recipe steps were supplied by the server.</p>}</section>
+      {(restaurant.name || restaurant.address || restaurant.reference) && <div className="recipe-suggestion-restaurant-note recipe-suggestion-restaurant-inline"><MapPin size={14} /> {restaurant.name || restaurant.address}{restaurant.reference && <a href={restaurant.reference} target="_blank" rel="noreferrer">Open restaurant reference <ExternalLink size={13} /></a>}</div>}
+      {showReviewControls && suggestion.status === 'PENDING' && <footer className="moderation-actions recipe-suggestion-review-actions"><div><strong>Decision required</strong><span>{approvalBlocked ? blockedMessage : 'Approve to import this dish and recipe, or reject with a reason.'}</span></div><div><button type="button" className="admin-btn secondary recipe-suggestion-reject" disabled={submitting} onClick={() => onReview('REJECT')}><X size={16} /> Reject</button><button type="button" className="admin-btn primary" disabled={submitting || approvalBlocked} title={approvalBlocked ? blockedMessage : undefined} onClick={() => onReview('APPROVE')}><Check size={16} /> Approve suggestion</button></div></footer>}
     </div>
   </article>;
 }
@@ -245,9 +305,35 @@ function SourceContentModal({ open, loading, error, post, fallback, onClose, onR
   </div>;
 }
 
+function ReviewDecisionDialog({ submitting, error, issues, onClose, onSubmit }) {
+  return <div className="admin-modal-backdrop" onMouseDown={onClose}><section className="admin-dialog recipe-review-dialog" role="dialog" aria-modal="true" aria-labelledby="suggestion-review-title" onMouseDown={(event) => event.stopPropagation()}>
+    <header className="recipe-dialog-header"><p>REVIEW</p><button type="button" className="recipe-dialog-close" onClick={onClose} disabled={submitting} aria-label="Close approval dialog"><X size={18} /></button></header>
+    <div className="recipe-dialog-body"><h2 id="suggestion-review-title">Approve this suggestion?</h2><p>This recipe will be imported into the catalog after approval.</p><p className="recipe-dialog-note"><Info size={14} /> Please confirm that the recipe details have been reviewed.</p>{error && <div className="recipe-suggestion-review-error" role="alert"><strong>Approval was blocked</strong><p>{error}</p>{issues.length > 0 && <ul>{issues.map((issue, index) => <li key={`${issue.field}-${issue.code}-${index}`}><b>{readableValidationField(issue.field)}</b><span>{issue.message}</span></li>)}</ul>}</div>}</div><div className="recipe-dialog-divider" />
+    <footer className="recipe-dialog-footer"><button type="button" className="admin-btn secondary" disabled={submitting} onClick={onClose}>Cancel</button><button type="button" className="admin-btn primary" disabled={submitting} onClick={onSubmit}>{submitting ? 'Saving...' : 'Approve'}</button></footer>
+  </section></div>;
+}
+
+function RejectionDialog({ reasonCode, reason, error, submitting, onReasonCodeChange, onReasonChange, onClose, onConfirm }) {
+  const isOther = reasonCode === 'OTHER';
+  const valid = Boolean(reasonCode) && (!isOther || Boolean(reason.trim()));
+  return <div className="admin-modal-backdrop" onMouseDown={onClose}><form className="admin-dialog recipe-review-dialog recipe-suggestion-rejection-dialog" role="dialog" aria-modal="true" aria-labelledby="recipe-rejection-title" onSubmit={(event) => { event.preventDefault(); if (valid) onConfirm(); }} onMouseDown={(event) => event.stopPropagation()}>
+    <header className="recipe-dialog-header"><p>REVIEW DECISION</p><button type="button" className="recipe-dialog-close" onClick={onClose} disabled={submitting} aria-label="Close rejection dialog"><X size={18} /></button></header>
+    <div className="recipe-dialog-body"><h2 id="recipe-rejection-title">Reject recipe suggestion</h2><p>Choose a reason for rejecting this recipe.</p>
+      <label htmlFor="recipe-rejection-reason">Rejection reason<select id="recipe-rejection-reason" value={reasonCode} disabled={submitting} onChange={(event) => onReasonCodeChange(event.target.value)}><option value="">Select a reason</option>{recipeRejectionReasons.map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select></label>
+      {isOther && <label htmlFor="recipe-rejection-custom">Specify rejection reason<textarea id="recipe-rejection-custom" maxLength={recipeRejectionReasonMaxLength} value={reason} disabled={submitting} onChange={(event) => onReasonChange(event.target.value)} placeholder="Explain why this recipe should be rejected..." aria-invalid={Boolean(error)} /><small>{reason.length}/{recipeRejectionReasonMaxLength}</small></label>}
+      {error && <div className="recipe-suggestion-review-error" role="alert"><strong>Rejection could not be submitted</strong><p>{error}</p></div>}
+    </div>
+    <footer className="recipe-dialog-footer"><button type="button" className="admin-btn secondary" disabled={submitting} onClick={onClose}>Cancel</button><button type="submit" className="admin-btn danger" disabled={!valid || submitting}>{submitting ? 'Rejecting...' : 'Confirm rejection'}</button></footer>
+  </form></div>;
+}
+
 export default function AdminContentRecipeSuggestionsPage() {
   const preview = import.meta.env.DEV && new URLSearchParams(window.location.search).get('preview') === '1';
+  const [workspace, setWorkspace] = useState('QUEUE');
   const [status, setStatus] = useState('PENDING');
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [queueQuery, setQueueQuery] = useState('');
+  const [queueContentType, setQueueContentType] = useState('');
   const [sortDirection, setSortDirection] = useState('desc');
   const [page, setPage] = useState(1);
   const [result, setResult] = useState({ content: [], totalElements: 0, totalPages: 0 });
@@ -261,6 +347,8 @@ export default function AdminContentRecipeSuggestionsPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [detailRefresh, setDetailRefresh] = useState(0);
   const [reviewDialog, setReviewDialog] = useState(null);
+  const [rejectionDialog, setRejectionDialog] = useState(false);
+  const [rejectionReasonCode, setRejectionReasonCode] = useState('');
   const [reviewReason, setReviewReason] = useState('');
   const [reviewError, setReviewError] = useState('');
   const [reviewIssues, setReviewIssues] = useState([]);
@@ -268,10 +356,30 @@ export default function AdminContentRecipeSuggestionsPage() {
   const [toast, setToast] = useState('');
   const [source, setSource] = useState(null);
   const [sourcePost, setSourcePost] = useState(null);
+  const [sourcePreviewPost, setSourcePreviewPost] = useState(null);
   const [sourceLoading, setSourceLoading] = useState(false);
   const [sourceError, setSourceError] = useState(null);
   const [sourceRefresh, setSourceRefresh] = useState(0);
+  useEffect(() => {
+    if (!source) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [source]);
+
+  useEffect(() => {
+    if (!reviewDialog && !rejectionDialog) return undefined;
+    const onKey = (event) => {
+      if (event.key === 'Escape' && !submittingReview) {
+        if (reviewDialog) closeReview();
+        else closeRejection();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [reviewDialog, rejectionDialog, submittingReview]);
   const [catalogIngredients, setCatalogIngredients] = useState([]);
+  const [catalogIngredientsLoading, setCatalogIngredientsLoading] = useState(true);
   const [ingredientMappings, setIngredientMappings] = useState({});
   const mappingSectionRef = useRef(null);
   const [ingredientCategories, setIngredientCategories] = useState([]);
@@ -281,8 +389,10 @@ export default function AdminContentRecipeSuggestionsPage() {
 
   useEffect(() => {
     const controller = new AbortController();
+    setCatalogIngredientsLoading(true);
     getAllergyIngredients(controller.signal).then((items) => { if (!controller.signal.aborted) setCatalogIngredients(Array.isArray(items) ? items : []); })
-      .catch(() => { if (!controller.signal.aborted) setCatalogIngredients([]); });
+      .catch(() => { if (!controller.signal.aborted) setCatalogIngredients([]); })
+      .finally(() => { if (!controller.signal.aborted) setCatalogIngredientsLoading(false); });
     return () => controller.abort();
   }, []);
 
@@ -306,12 +416,15 @@ export default function AdminContentRecipeSuggestionsPage() {
           return;
         }
         setResult(next);
-        setSelectedId((current) => next.content.some((item) => item.suggestionId === current) ? current : next.content[0]?.suggestionId ?? null);
+        setSelectedId((current) => {
+          if (workspace !== 'QUEUE') return next.content.some((item) => item.suggestionId === current) ? current : null;
+          return next.content.some((item) => item.suggestionId === current) ? current : next.content[0]?.suggestionId ?? null;
+        });
       })
       .catch(() => { if (!controller.signal.aborted) { setResult({ content: [], totalElements: 0, totalPages: 0 }); setSelectedId(null); setError(true); } })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [page, refreshKey, status]);
+  }, [page, refreshKey, status, workspace]);
 
   useEffect(() => {
     if (!selectedId) { setDetail(null); setDetailError(false); setDetailUnavailable(false); return undefined; }
@@ -342,6 +455,15 @@ export default function AdminContentRecipeSuggestionsPage() {
   }, [source, sourceRefresh]);
 
   useEffect(() => {
+    if (!detail?.source?.contentId) { setSourcePreviewPost(null); return undefined; }
+    const controller = new AbortController();
+    getPost(detail.source.contentId, controller.signal, detail.source.contentType)
+      .then((next) => { if (!controller.signal.aborted) setSourcePreviewPost(next); })
+      .catch(() => { if (!controller.signal.aborted) setSourcePreviewPost(null); });
+    return () => controller.abort();
+  }, [detail]);
+
+  useEffect(() => {
     if (!source) return undefined;
     const onKey = (event) => { if (event.key === 'Escape') setSource(null); };
     window.addEventListener('keydown', onKey);
@@ -353,8 +475,33 @@ export default function AdminContentRecipeSuggestionsPage() {
     const rightTime = new Date(right.createdAt ?? 0).getTime();
     return sortDirection === 'desc' ? rightTime - leftTime : leftTime - rightTime;
   }), [result.content, sortDirection]);
+  const visibleSuggestions = useMemo(() => {
+    const query = historyQuery.trim().toLocaleLowerCase('vi');
+    if (workspace === 'QUEUE') {
+      const queueSearch = queueQuery.trim().toLocaleLowerCase('vi');
+      return sortedSuggestions.filter((item) => (!queueContentType || item.source.contentType === queueContentType)
+        && (!queueSearch || [item.source.title, item.source.authorName, item.dish.name]
+          .some((value) => String(value ?? '').toLocaleLowerCase('vi').includes(queueSearch))));
+    }
+    const reviewedSuggestions = sortedSuggestions.filter((item) => item.status !== 'PENDING');
+    if (!query) return reviewedSuggestions;
+    return reviewedSuggestions.filter((item) => [item.source.title, item.source.authorName, item.dish.name, item.suggestionId]
+      .some((value) => String(value ?? '').toLocaleLowerCase('vi').includes(query)));
+  }, [historyQuery, queueContentType, queueQuery, sortedSuggestions, workspace]);
   const selected = useMemo(() => sortedSuggestions.find((item) => item.suggestionId === selectedId) ?? null, [sortedSuggestions, selectedId]);
+  const isQueue = workspace === 'QUEUE';
   const changeStatus = (nextStatus) => { setStatus(nextStatus); setPage(1); setSelectedId(null); };
+  const changeWorkspace = (nextWorkspace) => {
+    setWorkspace(nextWorkspace);
+    setHistoryQuery('');
+    setQueueQuery('');
+    setQueueContentType('');
+    changeStatus(nextWorkspace === 'QUEUE' ? 'PENDING' : '');
+  };
+  const workspaceTitle = isQueue ? 'Recipe suggestions' : 'Recipe suggestion history';
+  const workspaceText = isQueue
+    ? 'Assess pending community recipes, resolve validation issues, then approve or reject.'
+    : 'Review completed approvals and rejections without interrupting the active queue.';
   const retry = () => setRefreshKey((value) => value + 1);
   const openCreateIngredient = (proposalIndex, name) => {
     setCreateIngredientDraft({ proposalIndex, name: name ?? '', slug: slugFromName(name), categoryId: '', description: '' });
@@ -400,26 +547,36 @@ export default function AdminContentRecipeSuggestionsPage() {
       setToast('This suggestion cannot be approved until consent and validation checks pass.');
       return;
     }
+    if (action === 'REJECT') {
+      setRejectionDialog(true);
+      setRejectionReasonCode('');
+      setReviewReason('');
+      setReviewError('');
+      setReviewIssues([]);
+      return;
+    }
     setReviewDialog(action);
     setReviewReason('');
     setReviewError('');
     setReviewIssues([]);
   };
   const closeReview = () => { if (!submittingReview) setReviewDialog(null); };
+  const closeRejection = () => { if (!submittingReview) setRejectionDialog(false); };
   const openSource = (sourceInfo, fallback) => setSource({ contentId: sourceInfo.contentId, contentType: sourceInfo.contentType, fallback });
   const closeSource = () => setSource(null);
-  const submitReview = async () => {
-    if (!selectedId || !reviewDialog || submittingReview) return;
-    if (reviewDialog === 'REJECT' && !reviewReason.trim()) { setReviewError('Enter a reason before rejecting this suggestion.'); return; }
+  const submitReview = async (actionOverride = reviewDialog, reasonOverride = reviewReason) => {
+    if (!selectedId || !actionOverride || submittingReview) return;
+    if (actionOverride === 'REJECT' && !reasonOverride.trim()) { setReviewError('Enter a reason before rejecting this suggestion.'); return; }
     setSubmittingReview(true);
     setReviewError('');
     setReviewIssues([]);
     try {
       const mappings = Object.entries(ingredientMappings).filter(([, id]) => id).map(([proposalIndex, ingredientId]) => ({ proposalIndex: Number(proposalIndex), ingredientId: Number(ingredientId) }));
-      const updated = await contentRecipeSuggestionsApi.review(selectedId, reviewDialog, reviewReason, mappings);
+      const updated = await contentRecipeSuggestionsApi.review(selectedId, actionOverride, reasonOverride, mappings);
       setDetail(updated);
       setReviewDialog(null);
-      setToast(reviewDialog === 'APPROVE' ? 'Suggestion approved.' : 'Suggestion rejected.');
+      setRejectionDialog(false);
+      setToast(actionOverride === 'APPROVE' ? 'Suggestion approved.' : 'Suggestion rejected.');
       setRefreshKey((value) => value + 1);
     } catch (requestError) {
       const payloadData = requestError?.payload?.data;
@@ -440,31 +597,65 @@ export default function AdminContentRecipeSuggestionsPage() {
       }
     } finally { setSubmittingReview(false); }
   };
+  const confirmRejection = () => {
+    const selectedLabel = recipeRejectionReasons.find(([code]) => code === rejectionReasonCode)?.[1] ?? '';
+    const reason = rejectionReasonCode === 'OTHER' ? reviewReason.trim() : selectedLabel;
+    if (!rejectionReasonCode || (rejectionReasonCode === 'OTHER' && !reason)) {
+      setReviewError('Select a reason before rejecting this suggestion.');
+      return;
+    }
+    submitReview('REJECT', reason);
+  };
 
-  return <div className="recipe-suggestions-page">
+  return <div className="moderation-page recipe-suggestions-page">
     <PageHeader
       eyebrow="ADMINISTRATION / CONTENT REVIEW"
-      title="Recipe suggestions"
-      text="Review server-generated dish and recipe proposals from published community content."
-      action={<div className="recipe-suggestions-total" aria-live="polite"><Soup size={18} /><div><strong>{result.totalElements}</strong><span>server suggestions</span></div></div>}
+      title={workspaceTitle}
+      text={workspaceText}
+      action={<div className="recipe-suggestions-total" aria-live="polite"><Soup size={18} /><div><strong>{result.totalElements}</strong><span>{isQueue ? 'awaiting review' : 'completed records'}</span></div></div>}
     />
 
-    <AdminToolbar className="recipe-suggestions-toolbar" label="Suggestion filters">
-      <select className="admin-filter-select" aria-label="Filter suggestions by status" value={status} onChange={(event) => changeStatus(event.target.value)}><option value="PENDING">Pending</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option><option value="">All statuses</option></select>
-      <button type="button" className="recipe-suggestions-sort" onClick={() => setSortDirection((value) => value === 'desc' ? 'asc' : 'desc')} aria-label={sortDirection === 'desc' ? 'Sort by oldest first' : 'Sort by newest first'} title={sortDirection === 'desc' ? 'Newest first' : 'Oldest first'}><ArrowUpDown size={16} /><span>{sortDirection === 'desc' ? 'Newest' : 'Oldest'}</span></button>
-    </AdminToolbar>
+    <section className="recipe-suggestions-workspace" aria-label="Recipe suggestion workspace">
+      <nav className="moderation-workspace-tabs recipe-suggestions-tabs" aria-label="Recipe suggestion views">
+        <button type="button" aria-current={isQueue ? 'page' : undefined} className={isQueue ? 'is-active' : ''} onClick={() => changeWorkspace('QUEUE')}>Review Queue</button>
+        <button type="button" aria-current={!isQueue ? 'page' : undefined} className={!isQueue ? 'is-active' : ''} onClick={() => changeWorkspace('HISTORY')}>History</button>
+      </nav>
+      {isQueue && <AdminToolbar className="recipe-suggestions-toolbar" label="Suggestion filters">
+        <label className="admin-search moderation-search" aria-label="Search pending recipe suggestions"><Search size={17} aria-hidden="true" /><input aria-label="Search pending recipe suggestions" value={queueQuery} onChange={(event) => setQueueQuery(event.target.value)} placeholder="Search title or author on this page..." />{queueQuery && <button type="button" onClick={() => setQueueQuery('')} aria-label="Clear pending recipe search"><X size={15} /></button>}</label>
+        <div className="moderation-type-filter"><select className="admin-filter-select" aria-label="Recipe source type" value={queueContentType} onChange={(event) => setQueueContentType(event.target.value)}><option value="">All content</option><option value="BLOG">Blogs</option><option value="VIDEO">Videos</option></select></div>
+      </AdminToolbar>}
+    </section>
 
     {loading ? <section className="admin-panel recipe-suggestions-state"><LoadingState /></section>
       : error ? <section className="admin-panel recipe-suggestions-state"><ErrorState onRetry={retry} /></section>
-        : !result.content.length ? <section className="admin-panel recipe-suggestions-state"><EmptyState title="No suggestions found." text={status ? 'Try another server status filter.' : 'Eligible content will appear here when the server creates a suggestion.'} /></section>
-          : <div className="recipe-suggestions-board">
-            <section className="admin-panel recipe-suggestions-list" aria-label="Content recipe suggestions">
-              <header><div><h2>Suggestions to review</h2></div><span>{sortedSuggestions.length} on this page</span></header>
-              <div>{sortedSuggestions.map((item) => {
+        : !visibleSuggestions.length ? <section className="admin-panel recipe-suggestions-state"><EmptyState title={isQueue ? 'The review queue is clear.' : 'No history matches this filter.'} text={isQueue ? 'Eligible community content will appear here when the server creates a proposal.' : 'Try another decision filter or search term to see completed reviews.'} /></section>
+          : !isQueue ? <>
+            <section className="moderation-history-workspace recipe-suggestion-history-workspace" aria-label="Recipe review history controls">
+              <div className="moderation-history-primary">
+                <label className="moderation-history-search"><Search size={17} aria-hidden="true" /><input aria-label="Search recipe review history" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Search recipe, author or ID" />{historyQuery && <button type="button" onClick={() => setHistoryQuery('')} aria-label="Clear recipe history search"><X size={15} /></button>}</label>
+                <div className="moderation-history-toolbar-controls"><label className="moderation-decision-dropdown"><span>Decision</span><select aria-label="Filter review history by decision" value={status} onChange={(event) => changeStatus(event.target.value)}><option value="">All decisions</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select></label><button type="button" className="recipe-suggestions-sort" onClick={() => setSortDirection((value) => value === 'desc' ? 'asc' : 'desc')} aria-label={sortDirection === 'desc' ? 'Sort by oldest first' : 'Sort by newest first'}><ArrowUpDown size={16} /><span>{sortDirection === 'desc' ? 'Newest' : 'Oldest'}</span></button></div>
+              </div>
+            </section>
+            <section className="moderation-history-list recipe-suggestion-history-list" aria-label="Recipe review history">
+              {visibleSuggestions.map((item) => {
+                const approved = item.status === 'APPROVED';
+                const Icon = item.source.contentType === 'VIDEO' ? PlaySquare : FileText;
+                return <button className="moderation-history-row" type="button" key={item.suggestionId} onClick={() => setSelectedId(item.suggestionId)}>
+                  <span className="moderation-history-content"><span className="moderation-history-type-icon"><Icon size={16} /></span><span><b>{item.source.title}</b><small>{item.source.contentType === 'VIDEO' ? 'Video' : 'Blog'} <i>/</i> @{item.source.authorName} <i>/</i> #{item.suggestionId}</small><em>{item.dish.name}</em></span></span>
+                  <span className="moderation-history-trailing"><span className={approved ? 'moderation-decision approved' : 'moderation-decision rejected'}>{approved ? <Check size={16} /> : <X size={16} />}{approved ? 'Approved' : 'Rejected'}</span><time dateTime={item.reviewedAt || item.createdAt}>{formatDate(item.reviewedAt || item.createdAt)}</time><ChevronRight className="moderation-history-chevron" size={17} /></span>
+                </button>;
+              })}
+              {result.totalPages > 1 && <nav className="moderation-pagination recipe-suggestion-history-pagination" aria-label="Recipe history pagination"><button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)} aria-label="Previous page"><ChevronLeft size={17} /></button><span>{page} / {result.totalPages}</span><button type="button" disabled={page >= result.totalPages} onClick={() => setPage((value) => value + 1)} aria-label="Next page"><ChevronRight size={17} /></button></nav>}
+            </section>
+          </>
+          : <div className="moderation-board recipe-suggestions-board">
+            <section className="admin-panel moderation-queue recipe-suggestions-list" aria-label="Content recipe suggestions">
+              <header><h2>Review queue</h2><span>{visibleSuggestions.length} shown</span></header>
+              <div>{visibleSuggestions.map((item) => {
                 const active = item.suggestionId === selectedId;
                 const Icon = item.source.contentType === 'VIDEO' ? PlaySquare : FileText;
-                return <button key={item.suggestionId} type="button" className={active ? 'recipe-suggestion-row is-active' : 'recipe-suggestion-row'} onClick={() => setSelectedId(item.suggestionId)} aria-pressed={active}>
-                  <span className="recipe-suggestion-row-icon"><Icon size={18} /></span><span className="recipe-suggestion-row-copy"><span className="recipe-suggestion-row-top"><small>{item.source.contentType === 'VIDEO' ? 'Video' : 'Blog'}</small><SuggestionStatus status={item.status} /></span><strong>{item.source.title}</strong><small>By {item.source.authorName}</small><span className="recipe-suggestion-row-proposal">Proposed dish: <b>{item.dish.name}</b></span><time dateTime={item.createdAt}>{formatDate(item.createdAt)}</time></span>
+                return <button key={item.suggestionId} type="button" className={active ? 'moderation-queue-item recipe-suggestion-row is-active' : 'moderation-queue-item recipe-suggestion-row'} onClick={() => setSelectedId(item.suggestionId)} aria-pressed={active}>
+                  <span className="moderation-type-icon recipe-suggestion-row-icon"><Icon size={18} /></span><span className="moderation-queue-copy recipe-suggestion-row-copy"><strong>{item.source.title}</strong><small>{item.source.contentType === 'VIDEO' ? 'Video' : 'Blog'} <i>/</i> @{item.source.authorName}</small><time dateTime={item.createdAt}>{formatDate(item.createdAt)}</time></span><span className="moderation-queue-badges"><SuggestionStatus status={item.status} /></span>
                 </button>;
               })}</div>
               {result.totalPages > 1 && <nav className="recipe-suggestion-pagination" aria-label="Suggestion pagination"><button type="button" disabled={page <= 1} onClick={() => setPage((value) => value - 1)} aria-label="Previous page"><ChevronLeft size={16} /></button><span>Page {page} of {result.totalPages}</span><button type="button" disabled={page >= result.totalPages} onClick={() => setPage((value) => value + 1)} aria-label="Next page"><ChevronRight size={16} /></button></nav>}
@@ -472,13 +663,16 @@ export default function AdminContentRecipeSuggestionsPage() {
             {detailLoading ? <section className="admin-panel recipe-suggestion-detail-state"><LoadingState /></section>
               : detailError ? <section className="admin-panel recipe-suggestion-detail-state"><ErrorState onRetry={() => setDetailRefresh((value) => value + 1)} /></section>
                 : detailUnavailable ? <section className="admin-panel recipe-suggestion-detail-state"><EmptyState title="Suggestion is no longer available." text="The server reported that this suggestion or its source content cannot be reviewed." /></section>
-                : detail ? <RecipeDetail suggestion={detail} showReviewControls onReview={openReview} onOpenSource={(sourceInfo) => openSource(sourceInfo, detail)} submitting={submittingReview} catalogIngredients={catalogIngredients} ingredientMappings={ingredientMappings} onIngredientMapping={(index, id) => setIngredientMappings((current) => ({ ...current, [index]: id }))} onCreateIngredient={openCreateIngredient} mappingSectionRef={mappingSectionRef} />
+                : detail ? <EditorialRecipeDetail suggestion={detail} showReviewControls onReview={openReview} onOpenSource={(sourceInfo) => openSource(sourceInfo, detail)} sourceImage={sourcePreviewPost?.image} submitting={submittingReview} catalogIngredients={catalogIngredients} catalogIngredientsLoading={catalogIngredientsLoading} ingredientMappings={ingredientMappings} onIngredientMapping={(index, id) => setIngredientMappings((current) => ({ ...current, [index]: id }))} onCreateIngredient={openCreateIngredient} mappingSectionRef={mappingSectionRef} />
                   : selected ? <section className="admin-panel recipe-suggestion-detail-state"><EmptyState title="Suggestion detail is unavailable." text="The source may have changed or is no longer available on the server." /></section> : null}
           </div>}
-    {reviewDialog && <div className="admin-modal-backdrop" onMouseDown={closeReview}><section className="admin-dialog recipe-suggestion-review-dialog" role="dialog" aria-modal="true" aria-labelledby="suggestion-review-title" onMouseDown={(event) => event.stopPropagation()}><p>REVIEW</p><h2 id="suggestion-review-title">{reviewDialog === 'APPROVE' ? 'Approve this suggestion?' : 'Reject this suggestion?'}</h2><span>{reviewDialog === 'APPROVE' ? 'The proposed dish and recipe will be imported into the catalog.' : 'State why this proposal should not enter the catalog.'}</span>{reviewDialog === 'REJECT' && <label>Rejection reason<textarea value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} placeholder="Example: nutrition information needs a verifiable source" aria-invalid={Boolean(reviewError)} /></label>}{reviewError && <div className="recipe-suggestion-review-error" role="alert"><strong>{reviewDialog === 'APPROVE' ? 'Approval was blocked' : 'Review failed'}</strong><p>{reviewError}</p>{reviewIssues.length > 0 && <ul>{reviewIssues.map((issue, index) => <li key={`${issue.field}-${issue.code}-${index}`}><b>{issue.field || 'Suggestion'}</b>{issue.message}</li>)}</ul>}</div>}<div><button type="button" className="admin-btn secondary" disabled={submittingReview} onClick={closeReview}>Cancel</button><button type="button" className={`admin-btn ${reviewDialog === 'APPROVE' ? 'primary' : 'danger'}`} disabled={submittingReview} onClick={submitReview}>{submittingReview ? 'Saving...' : reviewDialog === 'APPROVE' ? 'Approve' : 'Reject'}</button></div></section></div>}
+    {!isQueue && selectedId && <aside className="moderation-history-drawer recipe-suggestion-history-drawer" role="dialog" aria-modal="true" aria-label="Recipe suggestion review detail"><header><div><span className="moderation-detail-kicker">RECIPE REVIEW</span><h2>{detail?.source?.title || selected?.source?.title || 'Recipe suggestion'}</h2></div><button type="button" onClick={() => setSelectedId(null)} aria-label="Close recipe history detail"><X size={19} /></button></header><div className="moderation-history-drawer-body recipe-suggestion-history-drawer-body">{detailLoading ? <LoadingState /> : detailError ? <ErrorState onRetry={() => setDetailRefresh((value) => value + 1)} /> : detail ? <EditorialRecipeDetail suggestion={detail} showReviewControls={false} onOpenSource={(sourceInfo) => openSource(sourceInfo, detail)} sourceImage={sourcePreviewPost?.image} /> : <EmptyState title="Suggestion detail is unavailable." />}</div></aside>}
+{reviewDialog && <ReviewDecisionDialog submitting={submittingReview} error={reviewError} issues={reviewIssues} onClose={closeReview} onSubmit={() => submitReview()} />}
+    {rejectionDialog && <RejectionDialog reasonCode={rejectionReasonCode} reason={reviewReason} error={reviewError} submitting={submittingReview} onReasonCodeChange={(value) => { setRejectionReasonCode(value); setReviewError(''); }} onReasonChange={(value) => { setReviewReason(value); setReviewError(''); }} onClose={closeRejection} onConfirm={confirmRejection} />}
     <CreateIngredientDialog draft={createIngredientDraft} categories={ingredientCategories} saving={creatingIngredient} error={createIngredientError} onClose={() => !creatingIngredient && setCreateIngredientDraft(null)} onChange={changeCreateIngredient} onSubmit={submitCreateIngredient} />
     <SourceContentModal open={Boolean(source)} loading={sourceLoading} error={sourceError} post={sourcePost} fallback={source?.fallback} onClose={closeSource} onRetry={() => setSourceRefresh((value) => value + 1)} />
     <Toast message={toast} onDismiss={() => setToast('')} />
     {preview && <span className="recipe-suggestions-preview-marker">Preview data</span>}
   </div>;
 }
+

@@ -44,6 +44,9 @@ vi.mock('../../../services/chatbotApi', () => ({
 }));
 
 const renderWithRouter = (ui) => render(<BrowserRouter>{ui}</BrowserRouter>);
+const sendWelcomePrompt = () => {
+  fireEvent.click(screen.getByRole('button', { name: /what should i eat tonight/i }));
+};
 
 describe('ChatbotWidget', () => {
   beforeEach(() => {
@@ -144,10 +147,35 @@ describe('ChatbotWidget', () => {
     fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
     const input = screen.getByLabelText(/message nutribot/i);
 
-    expect(input).toHaveAttribute('maxLength', '2000');
+    expect(input).not.toHaveAttribute('maxLength');
     fireEvent.change(input, { target: { value: '   ' } });
     fireEvent.submit(input.closest('form'));
     expect(requestNutritionAdvice).not.toHaveBeenCalled();
+  });
+
+  it('shows the live counter and blocks over-limit input without truncating it', () => {
+    renderWithRouter(<ChatbotWidget />);
+    fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
+    const input = screen.getByLabelText(/message nutribot/i);
+    const sendButton = screen.getByRole('button', { name: /send message/i });
+
+    expect(screen.getByText('0/2,000')).toBeInTheDocument();
+    expect(sendButton).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: 'x'.repeat(2_000) } });
+    expect(input).toHaveValue('x'.repeat(2_000));
+    expect(screen.getByText('2,000/2,000')).toBeInTheDocument();
+    expect(sendButton).toBeEnabled();
+
+    fireEvent.change(input, { target: { value: 'x'.repeat(2_001) } });
+    expect(input).toHaveValue('x'.repeat(2_001));
+    expect(screen.getByText('2,001/2,000')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Maximum 2,000 characters allowed.');
+    expect(sendButton).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: 'x'.repeat(1_999) } });
+    expect(screen.queryByText('Maximum 2,000 characters allowed.')).not.toBeInTheDocument();
+    expect(screen.getByText('1,999/2,000')).toBeInTheDocument();
   });
 
   it('turns an incomplete successful response into an error instead of a fake assistant answer', async () => {
@@ -155,7 +183,7 @@ describe('ChatbotWidget', () => {
     requestNutritionAdvice.mockResolvedValueOnce({});
     renderWithRouter(<ChatbotWidget />);
     fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-    fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+    sendWelcomePrompt();
 
     await waitFor(() => expect(screen.getByText(/incomplete response/i)).toBeInTheDocument());
     expect(screen.queryByText(/could not provide a response/i)).not.toBeInTheDocument();
@@ -167,7 +195,7 @@ describe('ChatbotWidget', () => {
     vi.useFakeTimers();
     renderWithRouter(<ChatbotWidget />);
     fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-    fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+    sendWelcomePrompt();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
@@ -176,7 +204,7 @@ describe('ChatbotWidget', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });
-    expect(screen.getByText(/phản hồi quá lâu/i)).toBeInTheDocument();
+    expect(screen.getByText(/took too long to respond/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /retry/i })).toBeEnabled();
     expect(document.querySelector('.chatbot-widget__typing')).not.toBeInTheDocument();
   });
@@ -200,7 +228,7 @@ describe('ChatbotWidget', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(109_999); });
     expect(screen.queryByText(/taking too long/i)).not.toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(screen.getByText(/phản hồi quá lâu/i)).toBeInTheDocument();
+    expect(screen.getByText(/took too long to respond/i)).toBeInTheDocument();
   });
 
   it('retries without adding another user message', async () => {
@@ -269,7 +297,7 @@ describe('ChatbotWidget', () => {
     expect(screen.queryByText('Would you like to see the cooking instructions?')).not.toBeInTheDocument();
     expect(requestNutritionAdvice).toHaveBeenCalledTimes(2);
     expect(requestNutritionAdvice.mock.calls[1][0].attachment).toBeUndefined();
-    expect(requestNutritionAdvice.mock.calls[1][0].message).toMatch(/structured video analysis/i);
+    expect(requestNutritionAdvice.mock.calls[1][0].message).toMatch(/^COOKING_INSTRUCTIONS:/);
   });
 
   it('dismisses the cooking follow-up without sending another request', async () => {
@@ -429,10 +457,10 @@ describe('ChatbotWidget', () => {
     await waitFor(() => expect(screen.getByText('Hi there!')).toBeInTheDocument());
 
     fireEvent.click(document.querySelector('.chatbot-widget__history-toggle'));
-    await waitFor(() => expect(screen.getByText('NEW CONVERSATION')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('NEW CONVERSATION'));
+    const newChatButton = await screen.findByRole('button', { name: /new chat/i });
+    fireEvent.click(newChatButton);
 
-    expect(screen.getByText('Small choices, made clearer.')).toBeInTheDocument();
+    expect(screen.getByText('What shall we eat today?')).toBeInTheDocument();
     expect(document.querySelectorAll('.chatbot-widget__prompt')).toHaveLength(4);
   });
 
@@ -456,7 +484,7 @@ describe('ChatbotWidget', () => {
     it('uses the remaining trial count returned by the API', async () => {
       renderWithRouter(<ChatbotWidget />);
       fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-      fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+      sendWelcomePrompt();
       await waitFor(() => {
         expect(document.querySelector('.chatbot-widget__trial-badge')).toHaveTextContent('2 of 3 questions left');
       });
@@ -467,7 +495,7 @@ describe('ChatbotWidget', () => {
       requestNutritionAdvice.mockResolvedValueOnce({ reply: 'Last free answer', remainingTrialCount: 0 });
       renderWithRouter(<ChatbotWidget />);
       fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-      fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+      sendWelcomePrompt();
       await waitFor(() => {
         expect(screen.getByRole('dialog', { name: /your free trial has ended/i })).toBeInTheDocument();
       });
@@ -480,7 +508,7 @@ describe('ChatbotWidget', () => {
       requestNutritionAdvice.mockRejectedValueOnce(limitError);
       renderWithRouter(<ChatbotWidget />);
       fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-      fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+      sendWelcomePrompt();
       await waitFor(() => {
         expect(screen.getByRole('dialog', { name: /your free trial has ended/i })).toBeInTheDocument();
       });
@@ -492,7 +520,7 @@ describe('ChatbotWidget', () => {
       requestNutritionAdvice.mockResolvedValueOnce({ reply: 'Last free answer', remainingTrialCount: 0 });
       renderWithRouter(<ChatbotWidget onAuth={onAuth} />);
       fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-      fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+      sendWelcomePrompt();
       await waitFor(() => expect(screen.getByRole('dialog', { name: /your free trial has ended/i })).toBeInTheDocument());
 
       fireEvent.click(screen.getByRole('button', { name: /log in/i }));
@@ -507,7 +535,7 @@ describe('ChatbotWidget', () => {
       requestNutritionAdvice.mockResolvedValueOnce({ reply: 'Answer without quota metadata' });
       renderWithRouter(<ChatbotWidget />);
       fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-      fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+      sendWelcomePrompt();
       await waitFor(() => expect(screen.getByText(/answer without quota metadata/i)).toBeInTheDocument());
       expect(document.querySelector('.chatbot-widget__trial-badge')).not.toBeInTheDocument();
     });
@@ -527,7 +555,7 @@ describe('ChatbotWidget', () => {
 
       renderWithRouter(<ChatbotWidget />);
       fireEvent.click(screen.getByRole('button', { name: /open nutribot chat/i }));
-      fireEvent.click(screen.getByRole('button', { name: /build a balanced plate/i }));
+      sendWelcomePrompt();
 
       await waitFor(() => expect(screen.getByText(/NutriBot could not respond right now/i)).toBeInTheDocument());
       expect(document.querySelector('.chatbot-widget__trial-badge')).not.toBeInTheDocument();

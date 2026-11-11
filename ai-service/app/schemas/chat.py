@@ -17,7 +17,8 @@ _IMAGE_SIGNATURES = {
     "image/webp": lambda data: data.startswith(b"RIFF") and data[8:12] == b"WEBP",
 }
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
-_MAX_VIDEO_BASE64_LENGTH = 36_000_000
+_MAX_VIDEO_BYTES = 25 * 1024 * 1024
+_MAX_VIDEO_BASE64_LENGTH = ((_MAX_VIDEO_BYTES + 2) // 3) * 4
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 _YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _VIDEO_SIGNATURES = {
@@ -31,7 +32,6 @@ _VIDEO_SIGNATURES = {
     "video/webm": lambda data: data.startswith(b"\x1a\x45\xdf\xa3"),
     "video/wmv": lambda data: data.startswith(b"\x30\x26\xb2\x75\x8e\x66\xcf\x11"),
 }
-_MAX_VIDEO_BYTES = 25 * 1024 * 1024
 
 
 def validate_youtube_url(value: str) -> str:
@@ -63,11 +63,14 @@ def validate_youtube_url(value: str) -> str:
     return normalized
 
 
+CHAT_MESSAGE_MAX_LENGTH = 2_000
+
+
 class ConversationMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sender: Literal["USER", "ASSISTANT"]
-    content: str = Field(min_length=1, max_length=2_000)
+    content: str = Field(min_length=1, max_length=CHAT_MESSAGE_MAX_LENGTH)
 
     @field_validator("sender", mode="before")
     @classmethod
@@ -264,7 +267,7 @@ class ChatVideo(BaseModel):
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    message: str = Field(default="", max_length=2_000)
+    message: str = Field(default="", max_length=CHAT_MESSAGE_MAX_LENGTH)
     session_id: str = Field(min_length=1, max_length=100)
     user_context: UserContext | None = None
     image: ChatImage | None = None

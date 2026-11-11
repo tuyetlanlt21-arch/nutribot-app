@@ -67,6 +67,30 @@ def test_image_followup_uses_saved_context_without_resending_media():
     assert "data_base64" not in str(models.call["contents"])
 
 
+def test_image_cooking_action_uses_image_context_not_video_prompt():
+    models = FakeModels()
+    service = GeminiService(
+        Settings(gemini_api_key="test-key"),
+        client=SimpleNamespace(aio=SimpleNamespace(models=models)),
+    )
+    request = ChatRequest(
+        message="COOKING_INSTRUCTIONS: provide the steps",
+        session_id="s",
+        user_context={"vegetarian_type": "VEGAN", "allergies": ["peanut"]},
+        conversation_history=[{
+            "sender": "ASSISTANT",
+            "content": "image_context: Clearly visible: tofu, carrot.\nrecognized_ingredients: tofu, carrot\nwarnings: Check sauce for peanut.",
+        }],
+    )
+
+    asyncio.run(service.chat(request))
+
+    assert models.call["config"].system_instruction != SYSTEM_INSTRUCTION
+    assert "COOKING_INSTRUCTIONS" in models.call["config"].system_instruction
+    assert "video_context" not in models.call["config"].system_instruction
+    assert "recognized_ingredients" in models.call["contents"]
+
+
 def test_all_text_recipe_and_weekly_questions_use_routine_model():
     class RecordingModels:
         calls = []
@@ -160,6 +184,19 @@ def test_context_supports_all_types_and_does_not_default_vegan():
 def test_request_rejects_invalid_message_and_history(payload):
     with pytest.raises(ValidationError):
         ChatRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("length", [1, 1_999, 2_000])
+def test_request_accepts_message_lengths_through_shared_limit(length):
+    request = ChatRequest.model_validate({"message": "x" * length, "session_id": "s"})
+
+    assert len(request.message) == length
+
+
+@pytest.mark.parametrize("length", [2_001, 5_000, 10_000])
+def test_request_rejects_message_above_shared_limit(length):
+    with pytest.raises(ValidationError):
+        ChatRequest.model_validate({"message": "x" * length, "session_id": "s"})
 
 
 def test_history_accepts_text_and_known_legacy_image_context():
@@ -304,6 +341,78 @@ def test_500_uses_one_fallback_attempt():
     response = asyncio.run(service.chat(ChatRequest(message="nutrition", session_id="s")))
     assert response.reply == "Safe answer"
     assert models.calls == 2
+
+
+def test_503_uses_one_routine_fallback_attempt():
+    class BusyModels:
+        calls = []
+
+        async def generate_content(self, **kwargs):
+            self.calls.append(kwargs["model"])
+            if len(self.calls) == 1:
+                raise errors.APIError(503, {"error": {"message": "high demand"}})
+            return SimpleNamespace(parsed=GeminiChatResult(reply="Fallback answer", recommendations=[]))
+
+    models = BusyModels()
+    service = GeminiService(Settings(gemini_api_key="test-key"), client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    response = asyncio.run(service.chat(ChatRequest(message="nutrition", session_id="s")))
+    assert response.reply == "Fallback answer"
+    assert models.calls == ["gemini-3.5-flash-lite", "gemini-3.6-flash"]
+
+
+def test_malformed_json_uses_structured_response_fallback():
+    class MalformedThenValid:
+        calls = []
+
+        async def generate_content(self, **kwargs):
+            self.calls.append(kwargs["model"])
+            if len(self.calls) == 1:
+                return SimpleNamespace(text='{"reply": "unterminated"')
+            return SimpleNamespace(parsed=GeminiChatResult(reply="Validated fallback", recommendations=[]))
+
+    models = MalformedThenValid()
+    service = GeminiService(Settings(gemini_api_key="test-key"), client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    response = asyncio.run(service.chat(ChatRequest(message="nutrition", session_id="s")))
+    assert response.reply == "Validated fallback"
+    assert models.calls == ["gemini-3.5-flash-lite", "gemini-3.6-flash"]
+
+
+def test_malformed_fallback_response_does_not_make_next_text_request_ineligible():
+    class MalformedFallback:
+        calls = []
+
+        async def generate_content(self, **kwargs):
+            self.calls.append(kwargs["model"])
+            if kwargs["model"] == "gemini-3.5-flash-lite":
+                raise errors.APIError(503, {"error": {"message": "high demand"}})
+            return SimpleNamespace(text="not json")
+
+    models = MalformedFallback()
+    service = GeminiService(
+        Settings(gemini_api_key="test-key"),
+        client=SimpleNamespace(aio=SimpleNamespace(models=models)),
+    )
+    with pytest.raises(AIResponseInvalidError):
+        asyncio.run(service.chat(ChatRequest(message="nutrition", session_id="s")))
+
+    # The primary remains in its intentional provider cooldown, but the
+    # malformed fallback response must not make both text models unavailable.
+    assert service._model_router.candidates("text") == ["gemini-3.6-flash"]
+
+
+def test_malformed_json_fallback_exhaustion_is_controlled_and_bounded():
+    class AlwaysMalformed:
+        calls = []
+
+        async def generate_content(self, **kwargs):
+            self.calls.append(kwargs["model"])
+            return SimpleNamespace(text='not json')
+
+    models = AlwaysMalformed()
+    service = GeminiService(Settings(gemini_api_key="test-key"), client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    with pytest.raises(AIResponseInvalidError):
+        asyncio.run(service.chat(ChatRequest(message="nutrition", session_id="s")))
+    assert models.calls == ["gemini-3.5-flash-lite", "gemini-3.6-flash"]
 
 
 def test_text_504_uses_one_routine_fallback_attempt():

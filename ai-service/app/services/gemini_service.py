@@ -10,6 +10,7 @@ import re
 import tempfile
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from google import genai
@@ -246,10 +247,102 @@ class GeminiService:
     @property
     def model_name(self): return self._settings.gemini_model
 
+    _MODERATION_YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+    async def _prepare_video_moderation_part(
+        self, client: Any, media_url: str
+    ) -> tuple[Any | None, str | None, str | None]:
+        """Processes a media_url for moderation: supports YouTube URI and Cloudinary/direct HTTP video upload."""
+        trimmed_url = media_url.strip()
+        try:
+            parsed = urlparse(trimmed_url)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if host in self._MODERATION_YOUTUBE_HOSTS and parsed.scheme in {"http", "https"}:
+                video_part = types.Part.from_uri(
+                    file_uri=trimmed_url,
+                    mime_type="video/mp4",
+                )
+                return video_part, None, None
+        except Exception as parse_err:
+            logger.warning("Lỗi phân tích URL video kiểm duyệt: %s", parse_err)
+
+        max_bytes = self._settings.gemini_video_max_bytes
+        temporary_path: str | None = None
+        remote_file_name: str | None = None
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+                async with http_client.stream("GET", trimmed_url) as resp:
+                    if resp.status_code != 200:
+                        return None, None, f"Không thể tải video từ URL (HTTP {resp.status_code})"
+
+                    content_length = resp.headers.get("content-length")
+                    if content_length and int(content_length) > max_bytes:
+                        return None, None, f"Video vượt quá dung lượng cho phép ({int(content_length) // (1024 * 1024)}MB > {max_bytes // (1024 * 1024)}MB)"
+
+                    content_type = resp.headers.get("content-type", "video/mp4").split(";")[0].strip()
+                    if not content_type.startswith("video/"):
+                        content_type = "video/mp4"
+
+                    suffix = "." + content_type.split("/", 1)[1].replace("x-", "")
+                    if suffix not in {".mp4", ".webm", ".mov", ".3gp", ".mpeg"}:
+                        suffix = ".mp4"
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+                        temporary_path = temp_file.name
+                        total_bytes = 0
+                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                            total_bytes += len(chunk)
+                            if total_bytes > max_bytes:
+                                Path(temporary_path).unlink(missing_ok=True)
+                                temporary_path = None
+                                return None, None, f"Video vượt quá dung lượng cho phép (> {max_bytes // (1024 * 1024)}MB)"
+                            temp_file.write(chunk)
+
+            upload_config = types.UploadFileConfig(mime_type=content_type)
+            uploaded = await self._maybe_await(
+                client.aio.files.upload(file=temporary_path, config=upload_config)
+            )
+            remote_file_name = getattr(uploaded, "name", None)
+            file_uri = getattr(uploaded, "uri", None)
+            if not remote_file_name or not file_uri:
+                return None, None, "Gemini không trả về định danh video hợp lệ"
+
+            deadline = time.monotonic() + self._settings.gemini_video_max_poll_seconds
+            current = uploaded
+            while True:
+                state = getattr(getattr(current, "state", None), "name", None) or str(
+                    getattr(current, "state", "")
+                ).upper()
+                if state == "ACTIVE":
+                    break
+                if state == "FAILED":
+                    return None, remote_file_name, "Gemini không xử lý được file video"
+                if time.monotonic() >= deadline:
+                    return None, remote_file_name, "Gemini xử lý video quá lâu (timeout)"
+                await asyncio.sleep(self._settings.gemini_video_poll_interval_seconds)
+                current = await self._maybe_await(client.aio.files.get(name=remote_file_name))
+
+            video_part = types.Part.from_uri(
+                file_uri=file_uri,
+                mime_type=content_type,
+            )
+            return video_part, remote_file_name, None
+        except Exception as exc:
+            logger.warning("Lỗi xử lý tải video kiểm duyệt: %s", exc)
+            return None, remote_file_name, f"Lỗi tải video ({str(exc)[:100]})"
+        finally:
+            if temporary_path:
+                try:
+                    Path(temporary_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     async def moderate_content(self, request):
-        """Return structured moderation fields; supports multimodal thumbnail evaluation."""
+        """Return structured moderation fields; supports multimodal thumbnail and video evaluation."""
         from app.schemas.moderation import ModelModeration
-        client = self._get_client()
+
+        is_video = request.content_type == "VIDEO" and bool(request.media_url and request.media_url.strip())
+        client = self._get_client(video_request=is_video)
 
         image_part = None
         if request.thumbnail_url and request.thumbnail_url.strip():
@@ -279,6 +372,26 @@ class GeminiService:
                     categories=["AMBIGUOUS"]
                 ).model_dump()
 
+        video_part = None
+        remote_video_file_name = None
+        if is_video:
+            video_part, remote_video_file_name, video_err = await self._prepare_video_moderation_part(
+                client, request.media_url
+            )
+            if video_err:
+                if remote_video_file_name:
+                    try:
+                        await self._delete_uploaded_video(client, remote_video_file_name, {})
+                    except Exception:
+                        pass
+                logger.warning("Video moderation preparation failed for content_id=%s: %s", request.content_id, video_err)
+                return ModelModeration(
+                    decision="NEEDS_REVIEW",
+                    reason=f"{video_err}, cần Admin duyệt thủ công",
+                    confidence=0.0,
+                    categories=["AMBIGUOUS"]
+                ).model_dump()
+
         prompt_text = (
             "You are the content moderation AI for NutriBot, a vegetarian & nutrition community platform. "
             "Policy instructions: "
@@ -288,7 +401,7 @@ class GeminiService:
             "   - IMPORTANT: White cubes or crumbles in salads and dishes are typically TOFU (đậu phụ) or cheese/dairy. They are completely SAFE, VALID, and must be treated as acceptable vegetarian food. Do NOT treat tofu, cheese, or eggs as violations. "
             "   - ONLY flag NON_VEGETARIAN_CONTENT or NON_VEGETARIAN_IMAGE if animal slaughter flesh (beef, pork, chicken, duck, poultry, fish, shrimp, seafood) is explicitly promoted or shown. "
             "2. SAFETY: "
-            "   - Flag SENSITIVE_IMAGE for NSFW, nudity, violence, or gore in attached images. "
+            "   - Flag SENSITIVE_IMAGE for NSFW, nudity, violence, or gore in attached images or video frames. "
             "   - Flag MEDICAL_CLAIM or UNSAFE_NUTRITION_ADVICE for dangerous health claims (e.g. curing cancer without evidence). "
             "   - Flag SPAM or OFF_TOPIC for promotional crypto, gambling, commercial spam. "
             "3. DECISION CRITERIA: "
@@ -300,10 +413,23 @@ class GeminiService:
             "   - If the image depicts completely unrelated objects (e.g., electronic gadgets, vehicles, random memes, unrelated animals, unrelated selfies) or a completely conflicting dish, flag UNRELATED_IMAGE or OFF_TOPIC. "
             "   - Set decision='REJECT' (if blatantly unrelated non-food spam/objects) or decision='NEEDS_REVIEW' with a clear explanation in 'reason' in Vietnamese (e.g. 'Ảnh thumbnail không liên quan đến món ăn trong bài viết'). "
             "   - If the image depicts the described dish, matching ingredients, or a plausible variation/serving of the food, it is SAFE and relevant. "
+            "5. VIDEO INSPECTION: "
+            "   - If a video is provided, inspect both the visual frames and audio of the video. "
+            "   - If the video shows preparation, cooking, or eating of real animal meat/seafood (beef, pork, chicken, fish, shrimp, etc.), flag NON_VEGETARIAN_CONTENT with decision='REJECT'. "
+            "   - If the video shows sensitive, violent, or NSFW content, flag SENSITIVE_IMAGE or VIOLENCE with decision='REJECT'. "
+            "   - If the video is completely unrelated to food, nutrition, cooking, or lifestyle (e.g. video games, random noise, movie clips, crypto spam), flag OFF_TOPIC or SPAM with decision='REJECT'. "
+            "   - If the video demonstrates a valid vegetarian recipe, cooking technique, or nutrition advice, set decision='APPROVE' with confidence >= 0.95 and categories=['SAFE']. "
             "Return structured JSON matching ModelModeration schema. "
             f"Content: {request.model_dump_json()}"
         )
-        contents = [prompt_text, image_part] if image_part is not None else prompt_text
+        if image_part is None and video_part is None:
+            contents = prompt_text
+        else:
+            contents = [prompt_text]
+            if image_part is not None:
+                contents.append(image_part)
+            if video_part is not None:
+                contents.append(video_part)
 
         config = types.GenerateContentConfig(
             system_instruction=MODERATION_UNTRUSTED_CONTENT_SYSTEM_INSTRUCTION,
@@ -311,8 +437,20 @@ class GeminiService:
             response_schema=ModelModeration,
             temperature=0,
         )
-        response = await self._generate_with_fallback(client, contents, config)
-        return self._parse_moderation_response(response).model_dump()
+        try:
+            if video_part is not None:
+                response = await self._generate_with_fallback(
+                    client, contents, config, task=VIDEO_TASK, video_request=True
+                )
+            else:
+                response = await self._generate_with_fallback(client, contents, config)
+            return self._parse_moderation_response(response).model_dump()
+        finally:
+            if remote_video_file_name:
+                try:
+                    await self._delete_uploaded_video(client, remote_video_file_name, {})
+                except Exception:
+                    pass
 
     @staticmethod
     def _parse_moderation_response(response: Any):
@@ -685,6 +823,11 @@ class GeminiService:
                     ),
                 ]
             inference_started = time.perf_counter()
+            response_parser = (
+                self._parse_video_followup_response
+                if has_video_context and not is_image_request
+                else self._parse_response
+            )
             generation = self._generate_with_fallback(
                 client,
                 contents,
@@ -692,6 +835,7 @@ class GeminiService:
                 telemetry=telemetry,
                 fallback_on_timeout=True,
                 task=task,
+                response_validator=response_parser,
             )
             request_timeout = (
                 self._settings.gemini_image_timeout_seconds
@@ -703,9 +847,7 @@ class GeminiService:
             response = await asyncio.wait_for(generation, timeout=request_timeout)
             telemetry["inference_duration_ms"] = round((time.perf_counter() - inference_started) * 1000)
             result = (
-                self._parse_video_followup_response(response)
-                if has_video_context and not is_image_request
-                else self._parse_response(response)
+                response_parser(response)
             )
             if has_video_context and any(term in request.message.casefold() for term in ("cooking instruction", "cooking step", "show me the cooking", "show the cooking")):
                 result = result.model_copy(update={"recommendations": []})
@@ -792,6 +934,7 @@ class GeminiService:
         video_request: bool = False,
         task: str | None = None,
         deadline: float | None = None,
+        response_validator: Any | None = None,
     ) -> Any:
         telemetry = telemetry if telemetry is not None else {}
         telemetry.setdefault("models", [])
@@ -810,6 +953,7 @@ class GeminiService:
             routing_task, candidates, candidates[0],
         )
 
+        last_invalid_response: AIResponseInvalidError | None = None
         for index, model in enumerate(candidates):
             telemetry["models"].append(model)
             telemetry["calls"] += 1
@@ -828,6 +972,29 @@ class GeminiService:
                     response = await client.aio.models.generate_content(
                         model=model, contents=prompt, config=config
                     )
+                if response_validator is not None:
+                    try:
+                        response_validator(response)
+                    except AIResponseInvalidError as exc:
+                        # A malformed provider response is model health failure,
+                        # not a successful generation. Cool it down and use the
+                        # already-routed alternative at most once.
+                        last_invalid_response = exc
+                        self._model_router.mark_invalid_response(
+                            model, "invalid_structured_response"
+                        )
+                        telemetry["errors"].append(
+                            {"model": model, "type": "AIResponseInvalidError"}
+                        )
+                        logger.warning(
+                            "Gemini structured response invalid task=%s model=%s fallback=%s",
+                            routing_task,
+                            model,
+                            index == 0 and len(candidates) > 1,
+                        )
+                        if index == 0 and len(candidates) > 1:
+                            continue
+                        raise
                 self._model_router.mark_success(model)
                 return response
             except errors.APIError as exc:
@@ -866,6 +1033,8 @@ class GeminiService:
             except Exception as exc:
                 telemetry["errors"].append({"model": model, "type": type(exc).__name__})
                 raise
+        if last_invalid_response is not None:
+            raise last_invalid_response
         raise self._model_router.unavailable_error(routing_task)
 
     async def _legacy_generate_with_fallback(

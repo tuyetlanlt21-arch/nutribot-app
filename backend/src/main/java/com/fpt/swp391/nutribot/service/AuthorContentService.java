@@ -40,8 +40,11 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.Normalizer;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Slf4j
@@ -138,7 +141,7 @@ public class AuthorContentService {
                 .build();
 
         Content saved = contentRepository.save(content);
-        if ("BLOG".equalsIgnoreCase(contentType) && request.getRecipe() != null) contentRecipePersistenceService.replace(saved, request.getRecipe());
+        if (request.getRecipe() != null) contentRecipePersistenceService.replace(saved, request.getRecipe());
         if (consentGranted) {
             saveConsentAudit(user, saved, null, true, "CREATE");
         }
@@ -274,7 +277,7 @@ public class AuthorContentService {
         }
 
         Content saved = contentRepository.save(content);
-        if ("BLOG".equalsIgnoreCase(content.getContentType()) && request.getRecipe() != null) contentRecipePersistenceService.replace(saved, request.getRecipe());
+        if (request.getRecipe() != null) contentRecipePersistenceService.replace(saved, request.getRecipe());
         return toAuthorResponse(saved);
     }
 
@@ -362,11 +365,62 @@ public class AuthorContentService {
         }
     }
 
-    /** Remove browser clipboard fragment wrappers without touching valid HTML. */
+    /** Convert incoming rich-text/HTML body content to readable plain text. */
     static String normalizeBody(String body) {
         if (body == null) return null;
-        return body.replaceAll("(?i)<!--\\s*StartFragment\\s*-->", "")
-                .replaceAll("(?i)<!--\\s*EndFragment\\s*-->", "");
+        String text = body.replaceAll("(?is)<!--.*?-->", "")
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</(?:p|div|h[1-6]|li|blockquote|tr)\\s*>", "\n")
+                .replaceAll("(?i)<(?:p|div|h[1-6]|li|blockquote|tr)(?:\\s[^>]*)?>", "")
+                .replaceAll("(?s)<[^>]*>", "");
+        text = decodeHtmlEntities(text)
+                .replace('\u00A0', ' ')
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replaceAll("(?m)[ \\t]+$", "")
+                .replaceAll("\n{3,}", "\n\n");
+        return text.trim();
+    }
+
+    private static String decodeHtmlEntities(String value) {
+        Map<String, String> entities = new HashMap<>();
+        entities.put("amp", "&");
+        entities.put("lt", "<");
+        entities.put("gt", ">");
+        entities.put("quot", "\"");
+        entities.put("apos", "'");
+        entities.put("nbsp", " ");
+        entities.put("hellip", "…");
+        entities.put("ndash", "–");
+        entities.put("mdash", "—");
+        entities.put("rsquo", "’");
+        entities.put("lsquo", "‘");
+        entities.put("rdquo", "”");
+        entities.put("ldquo", "“");
+        entities.put("copy", "©");
+        entities.put("reg", "®");
+        entities.put("trade", "™");
+        Pattern entityPattern = Pattern.compile("&(#x[0-9a-fA-F]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);?");
+        var matcher = entityPattern.matcher(value);
+        StringBuffer decoded = new StringBuffer();
+        while (matcher.find()) {
+            String token = matcher.group(1);
+            String replacement = null;
+            try {
+                if (token.startsWith("#x") || token.startsWith("#X")) {
+                    replacement = new String(Character.toChars(Integer.parseInt(token.substring(2), 16)));
+                } else if (token.startsWith("#")) {
+                    replacement = new String(Character.toChars(Integer.parseInt(token.substring(1))));
+                } else {
+                    replacement = entities.get(token.toLowerCase());
+                }
+            } catch (IllegalArgumentException ignored) {
+                // Preserve malformed or out-of-range entities as entered.
+            }
+            matcher.appendReplacement(decoded, Matcher.quoteReplacement(replacement == null ? matcher.group() : replacement));
+        }
+        matcher.appendTail(decoded);
+        return decoded.toString();
     }
 
     private void saveOrUpdateModeration(Integer contentId, ContentModerationGatewayService.ModerationResult moderation, boolean isApproved) {
@@ -522,14 +576,20 @@ public class AuthorContentService {
     private AuthorContentResponse toAuthorResponse(Content content) {
         String avatar = content.getUser() != null ? content.getUser().getAvatarUrl() : null;
         ContentModeration moderation = contentModerationRepository.findByContentId(content.getContentId()).orElse(null);
+        ContentRecipeDto resolvedRecipe = null;
+        if (contentRecipePersistenceService != null) {
+            resolvedRecipe = contentRecipePersistenceService.read(content.getContentId());
+        }
+        if (resolvedRecipe == null) {
+            resolvedRecipe = toRecipeDto(content);
+        }
         return AuthorContentResponse.builder()
                 .contentId(content.getContentId())
                 .contentType(content.getContentType())
                 .title(content.getTitle())
                 .slug(content.getSlug())
                 .body(content.getBody())
-                .recipe("BLOG".equalsIgnoreCase(content.getContentType()) ? contentRecipePersistenceService.read(content.getContentId()) : null)
-                .recipe(toRecipeDto(content))
+                .recipe(resolvedRecipe)
                 .categoryId(content.getCategoryId())
                 .mediaUrl(content.getMediaUrl())
                 .thumbnailUrl(content.getThumbnailUrl())
@@ -588,7 +648,7 @@ public class AuthorContentService {
     }
 
     private ContentRecipeDto toRecipeDto(Content content) {
-        if (!"BLOG".equalsIgnoreCase(content.getContentType()) || contentRecipeDetailRepository == null) return null;
+        if (content == null || content.getContentId() == null || contentRecipeDetailRepository == null) return null;
         var detail = contentRecipeDetailRepository.findById(content.getContentId()).orElse(null);
         var ingredients = contentRecipeIngredientRepository.findByContentIdOrderBySortOrderAsc(content.getContentId()).stream()
                 .map(value -> ContentRecipeDto.Ingredient.builder().name(value.getIngredientName()).quantity(value.getQuantity())
